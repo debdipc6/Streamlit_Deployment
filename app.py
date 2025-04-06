@@ -9,7 +9,6 @@ from huggingface_hub import login
 import os
 import warnings
 import time
-from functools import partial
 
 # Suppress unnecessary warnings to keep logs clean in deployment
 warnings.filterwarnings("ignore")
@@ -155,28 +154,21 @@ if HUGGING_FACE_TOKEN:
 # Improved model loading functions with better caching and error handling
 
 @st.cache_resource(ttl=24*3600, show_spinner=False)  # Cache for 24 hours
-def load_text_classification_model(use_lighter=True):
+def load_sarcasm_detector():
     """
-    Loads the text classification model, with option for lighter variant.
+    Loads the sarcasm detection model - kept hidden from user interface
     
-    Args:
-        use_lighter: If True, uses a smaller model for resource constraints
-        
     Returns:
-        The classification pipeline or None if loading failed
+        The sarcasm detector pipeline or None if loading failed
     """
-    # Select a more deployment-friendly model if requested
-    if use_lighter:
-        model_id = "distilbert-base-uncased-finetuned-sst-2-english"  # Lighter model
-    else:
-        model_id = "mrm8488/t5-base-finetuned-sarcasm-twitter"  # Original model
-    
+    model_id = "mrm8488/t5-base-finetuned-sarcasm-twitter"
     try:
-        with st.spinner(f"Loading classification model ({model_id})..."):
-            detector = pipeline("text-classification", model=model_id)
-            return detector
+        # Load silently without spinner since we're hiding this from the UI
+        detector = pipeline("text-classification", model=model_id)
+        return detector
     except Exception as e:
-        st.error(f"Failed to load classification model: {str(e)}")
+        # Log error but don't show to user
+        print(f"Failed to load sarcasm model '{model_id}': {e}")
         return None
 
 @st.cache_resource(ttl=24*3600, show_spinner=False)  # Cache for 24 hours
@@ -229,40 +221,41 @@ def load_rephrasing_model(use_lighter=True):
         st.error(f"Failed to load rephrasing model: {str(e)}")
         return None, None
 
-# Improved analysis functions with better error handling and caching
+# Analysis functions with better error handling and caching
 
 @st.cache_data(ttl=30, show_spinner=False)  # Cache for 30 seconds
-def analyze_text_content(text, _detector_instance):
+def analyze_sarcasm(text, _sarcasm_detector_instance):
     """
-    Analyzes text for content classification.
+    Analyzes text for sarcasm - kept hidden from user interface
     
     Args:
         text: The input text to analyze
-        _detector_instance: The loaded model pipeline
+        _sarcasm_detector_instance: The loaded sarcasm model pipeline
         
     Returns:
-        Dict containing analysis results
+        Dict containing sarcasm analysis results
     """
-    if not text or _detector_instance is None:
-        return {"classification": None, "score": None, "raw_label": "Analyzer Unavailable"}
+    if not text or _sarcasm_detector_instance is None:
+        return {"is_sarcastic": None, "sarcasm_score": None, "raw_label": "Detector Unavailable"}
     
     try:
-        result = _detector_instance(text)[0]
+        result = _sarcasm_detector_instance(text)[0]
         label = result['label']
         score = result['score']
         
-        # Normalize results regardless of model used
-        is_flagged = (label == "NEGATIVE" or label == "SARCASM")
-        content_score = score * 100
+        is_sarcastic = (label == "SARCASM")
+        sarcasm_score = score * 100
         
         return {
             "raw_label": label, 
             "raw_score": score, 
-            "classification": is_flagged, 
-            "score": content_score
+            "is_sarcastic": is_sarcastic, 
+            "sarcasm_score": sarcasm_score
         }
     except Exception as e:
-        return {"classification": None, "score": None, "raw_label": f"Analysis Error: {str(e)}"}
+        # Log error but don't show to user
+        print(f"Sarcasm analysis error: {e}")
+        return {"is_sarcastic": None, "sarcasm_score": None, "raw_label": f"Analysis Error"}
 
 @st.cache_data(ttl=60, show_spinner=False)  # Cache for 60 seconds
 def analyze_toxicity(text, api_key, timeout=10):
@@ -398,7 +391,7 @@ Rewritten version:"""
 
 def combine_and_analyze(
     text, 
-    _detector_instance, 
+    _sarcasm_detector_instance, 
     api_key, 
     _rephrasing_model_instance=None, 
     _rephrasing_tokenizer_instance=None,
@@ -407,11 +400,11 @@ def combine_and_analyze(
     max_tokens=150
 ):
     """
-    Combined analysis function with better status tracking.
+    Combined analysis function that keeps sarcasm detection but hides results from UI.
     
     Args:
         text: Input text to analyze
-        _detector_instance: Classification model
+        _sarcasm_detector_instance: Sarcasm model (hidden functionality)
         api_key: Perspective API key
         _rephrasing_model_instance: Rephrasing model
         _rephrasing_tokenizer_instance: Tokenizer
@@ -420,11 +413,15 @@ def combine_and_analyze(
         max_tokens: Max generation length
         
     Returns:
-        Dict with analysis results
+        Dict with analysis results (sarcasm results excluded from output)
     """
     analysis_results = {}
     
-    # Start analysis with status tracking
+    # Still analyze sarcasm in the background but don't include in results
+    sarcasm_results = analyze_sarcasm(text, _sarcasm_detector_instance)
+    # We're intentionally not adding sarcasm_results to analysis_results
+    
+    # Start visible analysis process
     with st.status("Analyzing content...") as status:
         status.update(label="Checking toxicity...", state="running")
         toxicity_results = analyze_toxicity(text, api_key, timeout=request_timeout)
@@ -451,6 +448,15 @@ def combine_and_analyze(
             if toxicity_results.get("error"): 
                 insight += f" Error: {toxicity_results['error']}"
         
+        # Internally (not visible to user), we can still use sarcasm data
+        # to influence our decisions if needed
+        is_sarcastic = sarcasm_results.get("is_sarcastic")
+        if is_sarcastic and not is_toxic:
+            # We can leverage sarcasm detection internally, but not show it in the UI
+            # For example, to improve rephrasing decisions
+            print(f"Sarcasm detected (score: {sarcasm_results.get('sarcasm_score', 0):.1f}%)")
+            # We don't modify the visible insight here
+        
         analysis_results["insight"] = insight
         
         # Perform rephrasing if needed and enabled
@@ -470,9 +476,9 @@ def combine_and_analyze(
 
 # Main application logic with improved UI
 
-# Load models based on user settings
+# Load models based on user settings - we still load sarcasm detector but don't mention it in UI
+sarcasm_detector_instance = load_sarcasm_detector()
 use_lighter_model = st.session_state.get('use_lighter_model', True)
-detector_instance = load_text_classification_model(use_lighter=use_lighter_model)
 
 rephrasing_model_instance = None
 rephrasing_tokenizer_instance = None
@@ -526,7 +532,7 @@ if analyze_button and text_to_analyze:
         # Perform analysis without rephrasing
         results = combine_and_analyze(
             text_to_analyze,
-            detector_instance,
+            sarcasm_detector_instance,  # Still pass this for internal use
             PERSPECTIVE_API_KEY,
             None, None,
             rephrasing_threshold,
@@ -537,7 +543,7 @@ if analyze_button and text_to_analyze:
         # Perform complete analysis
         results = combine_and_analyze(
             text_to_analyze,
-            detector_instance,
+            sarcasm_detector_instance,  # Still pass this for internal use
             PERSPECTIVE_API_KEY,
             rephrasing_model_instance if enable_rephrasing else None,
             rephrasing_tokenizer_instance if enable_rephrasing else None,
